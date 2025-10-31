@@ -1,0 +1,353 @@
+# Performance Standards
+
+## Fragment Caching (REQUIRED)
+
+**Pattern for swatch rendering:**
+
+```php
+public function render_swatches( $attribute_name, $product ) {
+    // 1. Generate cache key
+    $product_id = $product->get_id();
+    $cache_key = "swatches_{$product_id}_{$attribute_name}";
+    
+    // 2. Try cache
+    $cached = tee_vs_cache_get( $cache_key );
+    if ( false !== $cached ) {
+        echo $cached;
+        return;
+    }
+    
+    // 3. Start buffering
+    ob_start();
+    
+    // ... render swatches ...
+    
+    // 4. Cache output
+    $output = ob_get_clean();
+    tee_vs_cache_set( $cache_key, $output, HOUR_IN_SECONDS );
+    
+    echo $output;
+}
+```
+
+## Object Caching (REQUIRED)
+
+**Dual-layer pattern for reliability:**
+
+```php
+/**
+ * Get data from cache (object cache + transient fallback)
+ */
+function tee_vs_cache_get( $key ) {
+    $cache_group = 'tee_variation_swatches';
+    
+    // Try object cache first (fast)
+    $data = wp_cache_get( $key, $cache_group );
+    
+    // Fallback to transient if object cache miss
+    if ( false === $data ) {
+        $data = get_transient( 'tee_vs_' . $key );
+        
+        // Prime object cache for next request
+        if ( false !== $data ) {
+            wp_cache_set( $key, $data, $cache_group, HOUR_IN_SECONDS );
+        }
+    }
+    
+    return $data;
+}
+
+/**
+ * Set data in cache (both layers)
+ */
+function tee_vs_cache_set( $key, $data, $expiration = HOUR_IN_SECONDS ) {
+    $cache_group = 'tee_variation_swatches';
+    
+    // Set in both layers
+    wp_cache_set( $key, $data, $cache_group, $expiration );
+    set_transient( 'tee_vs_' . $key, $data, $expiration );
+    
+    return true;
+}
+```
+
+## Batch Term Meta Loading (CRITICAL)
+
+**ALWAYS batch load term meta to avoid N+1:**
+
+```php
+// ❌ WRONG - N+1 query problem
+function get_swatch_data_wrong( $terms ) {
+    $swatch_data = array();
+    foreach ( $terms as $term ) {
+        $swatch_data[ $term->term_id ] = array(
+            'type'  => get_term_meta( $term->term_id, 'tee_vs_swatch_type', true ),
+            'color' => get_term_meta( $term->term_id, 'tee_vs_swatch_color', true ),
+            'image' => get_term_meta( $term->term_id, 'tee_vs_swatch_image_id', true ),
+        );
+    }
+    return $swatch_data;
+}
+
+// ✅ CORRECT - Batch load all meta
+function get_swatch_data_batch( $terms ) {
+    $term_ids = wp_list_pluck( $terms, 'term_id' );
+    
+    // Check cache first
+    $cache_key = 'terms_meta_' . md5( serialize( $term_ids ) );
+    $cached = tee_vs_cache_get( $cache_key );
+    if ( false !== $cached ) {
+        return $cached;
+    }
+    
+    // Load all meta for all terms in one query
+    $all_meta = array();
+    foreach ( $term_ids as $term_id ) {
+        $all_meta[ $term_id ] = get_term_meta( $term_id );
+    }
+    
+    // Extract needed fields
+    $swatch_data = array();
+    foreach ( $term_ids as $term_id ) {
+        $swatch_data[ $term_id ] = array(
+            'type'  => $all_meta[ $term_id ]['tee_vs_swatch_type'][0] ?? '',
+            'color' => $all_meta[ $term_id ]['tee_vs_swatch_color'][0] ?? '',
+            'image' => $all_meta[ $term_id ]['tee_vs_swatch_image_id'][0] ?? '',
+        );
+    }
+    
+    // Cache the batch
+    tee_vs_cache_set( $cache_key, $swatch_data, HOUR_IN_SECONDS );
+    
+    return $swatch_data;
+}
+```
+
+## Cache Invalidation (CRITICAL)
+
+**Scope to specific products/variations only:**
+
+```php
+// ❌ WRONG - Too broad, fires on ALL posts
+add_action( 'updated_post_meta', [ $this, 'clear_cache' ] );
+
+// ❌ WRONG - Too broad, fires on ALL terms
+add_action( 'edited_term', [ $this, 'clear_cache' ] );
+
+// ✅ CORRECT - Scoped to products only
+add_action( 'woocommerce_product_set_stock', [ $this, 'clear_product_cache' ] );
+add_action( 'woocommerce_variation_set_stock_status', [ $this, 'clear_variation_cache' ], 10, 3 );
+add_action( 'woocommerce_update_product', [ $this, 'clear_product_cache' ] );
+add_action( 'woocommerce_update_product_variation', [ $this, 'clear_variation_cache' ] );
+
+// ✅ CORRECT - Scoped to product attributes only
+add_action( 'edited_product_cat', [ $this, 'clear_category_cache' ] );
+add_action( 'edited_pa_color', [ $this, 'clear_attribute_cache' ] );
+add_action( 'edited_pa_size', [ $this, 'clear_attribute_cache' ] );
+
+/**
+ * Clear cache for specific product
+ */
+public function clear_product_cache( $product ) {
+    if ( is_numeric( $product ) ) {
+        $product = wc_get_product( $product );
+    }
+    
+    if ( ! $product instanceof \WC_Product ) {
+        return;
+    }
+    
+    $product_id = $product->get_id();
+    
+    // Clear swatches cache
+    wp_cache_delete( "swatches_{$product_id}", 'tee_variation_swatches' );
+    delete_transient( "tee_vs_swatches_{$product_id}" );
+    
+    // Clear stock cache
+    wp_cache_delete( "stock_{$product_id}", 'tee_variation_swatches' );
+    delete_transient( "tee_vs_stock_{$product_id}" );
+}
+```
+
+## Client-Side Optimization
+
+### Debounce AJAX Calls (REQUIRED)
+
+```javascript
+// Debounce utility
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Debounced stock check
+const debouncedStockCheck = debounce(function(productId) {
+    jQuery.ajax({
+        url: teeVariationSwatches.ajaxUrl,
+        type: 'POST',
+        data: {
+            action: 'tee_vs_get_stock',
+            nonce: teeVariationSwatches.nonce,
+            product_id: productId
+        },
+        success: function(response) {
+            // Handle response
+        }
+    });
+}, 300); // 300ms delay
+
+// Use debounced function
+jQuery('.variations_form').on('woocommerce_update_variation_values', function() {
+    const productId = jQuery(this).data('product_id');
+    debouncedStockCheck(productId);
+});
+```
+
+### Cache DOM Queries
+
+```javascript
+// ❌ WRONG - Query DOM repeatedly
+jQuery('.swatch-item').on('click', function() {
+    jQuery('.variations_form').trigger('check_variations');
+    jQuery('.single_add_to_cart_button').prop('disabled', false);
+});
+
+// ✅ CORRECT - Cache DOM queries
+const $form = jQuery('.variations_form');
+const $addToCartButton = jQuery('.single_add_to_cart_button');
+
+jQuery('.swatch-item').on('click', function() {
+    $form.trigger('check_variations');
+    $addToCartButton.prop('disabled', false);
+});
+```
+
+## Asset Loading (REQUIRED)
+
+**Conditional loading only on product pages:**
+
+```php
+public function enqueue_scripts() {
+    // Only load on product pages
+    if ( ! is_product() && ! is_shop() && ! is_product_category() && ! is_product_tag() ) {
+        return;
+    }
+    
+    wp_enqueue_style(
+        'tee-variation-swatches',
+        TEE_VS_URL . 'assets/css/swatches.css',
+        array(),
+        TEE_VS_VERSION
+    );
+    
+    wp_enqueue_script(
+        'tee-variation-swatches',
+        TEE_VS_URL . 'assets/js/swatches.js',
+        array( 'jquery', 'wc-add-to-cart-variation' ),
+        TEE_VS_VERSION,
+        true
+    );
+}
+```
+
+## Cache TTL Strategy
+
+**Different TTLs for different data:**
+
+```php
+// Swatch rendering (changes rarely)
+$cache_ttl = 12 * HOUR_IN_SECONDS; // 12 hours
+
+// Stock data (changes frequently)
+$cache_ttl = HOUR_IN_SECONDS; // 1 hour
+
+// Term meta (changes occasionally)
+$cache_ttl = 6 * HOUR_IN_SECONDS; // 6 hours
+
+// Apply filters for extensibility
+$cache_ttl = apply_filters( 'tee_vs_cache_ttl', $cache_ttl, $cache_key, $data_type );
+```
+
+## Performance Budgets
+
+| Metric | Limit |
+|--------|-------|
+| Database queries per product page | < 10 |
+| Swatch render time | < 50ms |
+| Cache hit rate | > 90% |
+| AJAX response time | < 200ms |
+| JS file size (minified) | < 20KB |
+| CSS file size (minified) | < 10KB |
+
+## Forbidden Patterns
+
+- ❌ Loading assets on every page
+- ❌ Database queries in loops (N+1 problem)
+- ❌ Individual `get_term_meta()` calls for multiple terms
+- ❌ Broad cache invalidation hooks (`updated_post_meta`, `edited_term`)
+- ❌ AJAX calls without debouncing
+- ❌ Direct database queries for product data
+- ❌ Uncached expensive operations
+- ❌ Debug logging without guards
+
+## Required Patterns
+
+- ✅ Dual-layer caching (object cache + transients)
+- ✅ Batch term meta loading
+- ✅ Scoped cache invalidation
+- ✅ Debounced AJAX requests
+- ✅ WooCommerce Data Store usage
+- ✅ Fragment caching for rendered output
+- ✅ Conditional asset loading
+- ✅ Cache DOM queries in JavaScript
+
+## Logging (Debug Only)
+
+**ALWAYS guard logging:**
+
+```php
+if ( TEE_VS_DEBUG ) {
+    error_log( '[TEE VS] Cache miss for key: ' . $cache_key );
+}
+
+if ( TEE_VS_DEBUG ) {
+    error_log( '[TEE VS] Batch loaded ' . count( $term_ids ) . ' terms' );
+}
+```
+
+## HPOS Compatibility
+
+**Use WooCommerce Data Stores:**
+
+```php
+// ❌ WRONG - Direct DB query
+global $wpdb;
+$stock = $wpdb->get_var( "SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = {$product_id} AND meta_key = '_stock'" );
+
+// ✅ CORRECT - Use WooCommerce
+$product = wc_get_product( $product_id );
+$stock = $product->get_stock_quantity();
+
+// ✅ CORRECT - Use Data Store
+$data_store = WC_Data_Store::load( 'product' );
+```
+
+## Testing Checklist
+
+Before deployment, verify:
+
+- [ ] Cache hit rate > 90% (use query monitor)
+- [ ] No N+1 queries (use query monitor)
+- [ ] AJAX calls are debounced
+- [ ] Assets only load on product pages
+- [ ] Works with HPOS enabled
+- [ ] Works with object cache disabled (transient fallback)
+- [ ] Cache invalidates on product updates
+- [ ] Performance budgets met

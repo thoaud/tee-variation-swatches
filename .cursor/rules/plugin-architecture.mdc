@@ -1,0 +1,272 @@
+# Plugin Architecture
+
+## Class Structure
+
+All classes follow the **Singleton Pattern**:
+
+```php
+<?php
+namespace TEE\Variation_Swatches;
+
+class ClassName {
+    private static $instance = null;
+    
+    public static function instance() {
+        if ( is_null( self::$instance ) ) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+    
+    private function __construct() {
+        $this->init_hooks();
+    }
+    
+    private function init_hooks() {
+        // Register WordPress hooks here
+    }
+}
+```
+
+## Namespace Pattern
+
+All classes use namespace: `TEE\Variation_Swatches\[SubNamespace]`
+
+**Subnamespaces**:
+- `Admin` - Admin interface and settings
+- `WooCommerce` - WooCommerce integration
+- `Cache` - Caching layer (if needed)
+
+## File Organization
+
+```
+tee-variation-swatches/
+├── tee-variation-swatches.php      # Main plugin file
+├── includes/
+│   ├── class-plugin.php            # Main plugin class
+│   ├── helpers.php                 # Helper functions & caching
+│   ├── admin/
+│   │   └── class-admin-settings.php
+│   └── woocommerce/
+│       ├── class-variation-handler.php
+│       └── class-stock-manager.php
+├── assets/
+│   ├── css/                        # Stylesheets
+│   └── js/                         # JavaScript files
+└── examples/                       # Example templates
+```
+
+## Asset Loading Pattern
+
+Only load scripts/styles on relevant pages:
+
+```php
+public function enqueue_scripts() {
+    // Only load on product pages
+    if ( ! is_product() && ! is_shop() && ! is_product_category() ) {
+        return;
+    }
+    
+    wp_enqueue_style(
+        'tee-variation-swatches',
+        TEE_VS_URL . 'assets/css/swatches.css',
+        array(),
+        TEE_VS_VERSION
+    );
+    
+    wp_enqueue_script(
+        'tee-variation-swatches',
+        TEE_VS_URL . 'assets/js/swatches.js',
+        array( 'jquery', 'wc-add-to-cart-variation' ),
+        TEE_VS_VERSION,
+        true
+    );
+    
+    wp_localize_script(
+        'tee-variation-swatches',
+        'teeVariationSwatches',
+        array(
+            'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+            'nonce'   => wp_create_nonce( 'tee_vs_nonce' ),
+            'i18n'    => array(
+                'outOfStock' => __( 'Out of stock', 'tee-variation-swatches' ),
+                'lowStock'   => __( 'Low stock', 'tee-variation-swatches' ),
+            ),
+        )
+    );
+}
+```
+
+## WooCommerce Integration Pattern
+
+### Getting Product Data
+
+**ALWAYS use WooCommerce functions, never direct DB queries:**
+
+```php
+// Get product
+$product = wc_get_product( $product_id );
+
+// Get variation
+$variation = wc_get_product( $variation_id );
+
+// Get products (batch)
+$products = wc_get_products( array(
+    'status' => 'publish',
+    'limit'  => 50,
+) );
+```
+
+### Stock Management
+
+```php
+// Get stock status
+$stock_status = $product->get_stock_status();
+
+// Get stock quantity
+$stock_qty = $product->get_stock_quantity();
+
+// Check if in stock
+$is_in_stock = $product->is_in_stock();
+
+// Check if on backorder
+$is_on_backorder = $product->is_on_backorder();
+```
+
+### Variation Data
+
+```php
+// Get variation attributes
+$variation_attributes = $variation->get_variation_attributes();
+
+// Get available variations for variable product
+$available_variations = $product->get_available_variations();
+
+// Get variation by attributes
+$variation_id = $product->get_matching_variation( $attributes );
+```
+
+## Cache Key Pattern
+
+**Consistent naming with versioning:**
+
+```php
+// Include plugin version in cache group for easy invalidation
+$cache_group = 'tee_variation_swatches_v' . TEE_VS_VERSION;
+
+// Product-scoped keys
+$cache_key = "product_{$product_id}_swatches";
+$cache_key = "variation_{$variation_id}_data";
+
+// Term-scoped keys (batch multiple terms)
+$cache_key = "terms_meta_" . md5( serialize( $term_ids ) );
+
+// Attribute-scoped keys
+$cache_key = "attribute_{$attribute_name}_terms";
+```
+
+## Hook Priority Pattern
+
+**Standard priorities for WooCommerce hooks:**
+
+```php
+// Early hooks (before WooCommerce)
+add_action( 'woocommerce_init', [ $this, 'init' ], 5 );
+
+// Normal hooks (default)
+add_action( 'woocommerce_before_variations_form', [ $this, 'render_swatches' ], 10 );
+
+// Late hooks (after other plugins)
+add_filter( 'woocommerce_dropdown_variation_attribute_options_html', [ $this, 'replace_dropdown' ], 100, 2 );
+
+// Very late hooks (cleanup)
+add_action( 'woocommerce_after_single_product', [ $this, 'cleanup' ], 999 );
+```
+
+## Template Pattern
+
+**Escapable output with clean separation:**
+
+```php
+public function render_swatch( $term, $attribute_name, $product ) {
+    $swatch_type  = $this->get_swatch_type( $term->term_id );
+    $swatch_data  = $this->get_swatch_data( $term->term_id );
+    $is_available = $this->is_variation_available( $term->slug, $attribute_name, $product );
+    
+    ?>
+    <div class="tee-swatch-item <?php echo esc_attr( $swatch_type ); ?> <?php echo $is_available ? '' : 'disabled'; ?>"
+         data-term-slug="<?php echo esc_attr( $term->slug ); ?>"
+         data-attribute="<?php echo esc_attr( $attribute_name ); ?>">
+        <?php $this->render_swatch_inner( $swatch_type, $swatch_data ); ?>
+    </div>
+    <?php
+}
+```
+
+## Settings Pattern
+
+**Option Name**: `tee_vs_options`
+
+**Get Settings**:
+```php
+$settings = get_option( 'tee_vs_options', array() );
+$threshold = $settings['low_stock_threshold'] ?? 10;
+$swatch_type = $settings['default_swatch_type'] ?? 'button';
+```
+
+**Update Settings**:
+```php
+$settings = get_option( 'tee_vs_options', array() );
+$settings['low_stock_threshold'] = absint( $_POST['threshold'] );
+update_option( 'tee_vs_options', $settings );
+```
+
+## HPOS Compatibility
+
+**Check if HPOS is enabled:**
+
+```php
+public function is_hpos_enabled() {
+    if ( ! class_exists( 'Automattic\WooCommerce\Utilities\OrderUtil' ) ) {
+        return false;
+    }
+    return \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+}
+```
+
+**Use WooCommerce Data Stores:**
+
+```php
+// Get product data store
+$data_store = WC_Data_Store::load( 'product' );
+
+// Get variation data store
+$variation_data_store = WC_Data_Store::load( 'product-variation' );
+```
+
+## Constants Usage
+
+```php
+// Plugin paths
+$css_file = TEE_VS_PATH . 'assets/css/swatches.css';
+$css_url  = TEE_VS_URL . 'assets/css/swatches.css';
+
+// Version for cache busting
+wp_enqueue_style( 'tee-vs', $css_url, array(), TEE_VS_VERSION );
+
+// Debug mode
+if ( TEE_VS_DEBUG ) {
+    error_log( '[TEE VS] Debug message' );
+}
+```
+
+## Multisite Support
+
+```php
+// Plugin already includes this in main file:
+if ( function_exists( 'wp_cache_add_global_groups' ) ) {
+    wp_cache_add_global_groups( array( 'tee_variation_swatches' ) );
+}
+```
+
+This ensures cache is shared across multisite network.

@@ -1,0 +1,371 @@
+---
+globs: *.php
+---
+
+# PHP Code Standards
+
+## Security First
+
+### Input Sanitization
+
+**ALWAYS sanitize user input:**
+
+```php
+// Text input
+$value = sanitize_text_field( $_POST['field'] ?? '' );
+
+// Numbers
+$id = absint( $_GET['id'] ?? 0 );
+
+// Hex color
+$color = sanitize_hex_color( $_POST['color'] ?? '#000000' );
+
+// Arrays
+$items = array_map( 'sanitize_text_field', $_POST['items'] ?? array() );
+
+// Email
+$email = sanitize_email( $_POST['email'] ?? '' );
+
+// URL
+$url = esc_url_raw( $_POST['url'] ?? '' );
+```
+
+### Output Escaping
+
+**ALWAYS escape output:**
+
+```php
+// Text content
+echo esc_html( $text );
+
+// HTML attributes
+echo '<div data-id="' . esc_attr( $id ) . '">';
+
+// URLs
+echo '<a href="' . esc_url( $url ) . '">';
+
+// JavaScript strings
+echo '<script>var message = "' . esc_js( $message ) . '";</script>';
+```
+
+### Nonce Verification
+
+**ALWAYS verify nonces for AJAX:**
+
+```php
+// In AJAX handler
+check_ajax_referer( 'tee_vs_nonce', 'nonce' );
+
+// In form submission
+wp_verify_nonce( $_POST['_wpnonce'], 'tee_vs_action' );
+
+// Create nonce
+wp_nonce_field( 'tee_vs_action', '_wpnonce' );
+wp_create_nonce( 'tee_vs_action' );
+```
+
+## WooCommerce Integration Patterns
+
+### Product Data Access
+
+**NEVER query database directly, use WooCommerce functions:**
+
+```php
+// ❌ WRONG - Direct DB query
+global $wpdb;
+$results = $wpdb->get_results( "SELECT * FROM {$wpdb->posts} WHERE post_type = 'product'" );
+
+// ✅ CORRECT - Use WooCommerce functions
+$products = wc_get_products( array(
+    'status' => 'publish',
+    'limit'  => 50,
+) );
+```
+
+### Stock Management
+
+```php
+// Get stock status
+$stock_status = $product->get_stock_status(); // 'instock', 'outofstock', 'onbackorder'
+
+// Get stock quantity
+$stock_qty = $product->get_stock_quantity(); // int or null
+
+// Check if managing stock
+$manages_stock = $product->get_manage_stock(); // bool
+
+// Check if in stock
+$is_in_stock = $product->is_in_stock(); // bool
+```
+
+### Variation Handling
+
+```php
+// Get variation attributes
+$attributes = $variation->get_variation_attributes();
+
+// Get parent product
+$parent_id = $variation->get_parent_id();
+$parent = wc_get_product( $parent_id );
+
+// Get variation image
+$image_id = $variation->get_image_id();
+$image_url = wp_get_attachment_image_url( $image_id, 'thumbnail' );
+
+// Check if variation is visible
+$is_visible = $variation->is_visible();
+```
+
+### Term Meta (Product Attributes)
+
+**Batch load to avoid N+1:**
+
+```php
+// ❌ WRONG - N+1 query problem
+foreach ( $terms as $term ) {
+    $color = get_term_meta( $term->term_id, 'tee_vs_swatch_color', true );
+}
+
+// ✅ CORRECT - Batch load
+$term_ids = wp_list_pluck( $terms, 'term_id' );
+$term_meta = array();
+
+// Load all meta for all terms at once
+foreach ( $term_ids as $term_id ) {
+    $term_meta[ $term_id ] = get_term_meta( $term_id );
+}
+
+// Then access without additional queries
+foreach ( $terms as $term ) {
+    $color = $term_meta[ $term->term_id ]['tee_vs_swatch_color'][0] ?? '';
+}
+```
+
+## Caching Pattern
+
+**ALWAYS use dual-layer caching:**
+
+```php
+// Get from cache
+$data = wp_cache_get( $key, 'tee_variation_swatches' );
+if ( false === $data ) {
+    $data = get_transient( 'tee_vs_' . $key );
+    if ( false !== $data ) {
+        wp_cache_set( $key, $data, 'tee_variation_swatches', HOUR_IN_SECONDS );
+        return $data;
+    }
+}
+
+// Cache miss - perform expensive operation
+$data = $this->fetch_data();
+
+// Store in both layers
+wp_cache_set( $key, $data, 'tee_variation_swatches', HOUR_IN_SECONDS );
+set_transient( 'tee_vs_' . $key, $data, HOUR_IN_SECONDS );
+
+return $data;
+```
+
+**Or use helper functions:**
+
+```php
+// Get cached data
+$data = tee_vs_cache_get( $key );
+if ( false === $data ) {
+    $data = $this->fetch_data();
+    tee_vs_cache_set( $key, $data, HOUR_IN_SECONDS );
+}
+```
+
+## Cache Invalidation Pattern
+
+**Scope invalidation to specific products/variations:**
+
+```php
+// ❌ WRONG - Too broad
+add_action( 'updated_post_meta', [ $this, 'clear_all_caches' ] );
+
+// ✅ CORRECT - Scoped to products
+add_action( 'woocommerce_product_set_stock', [ $this, 'clear_product_cache' ] );
+add_action( 'woocommerce_variation_set_stock_status', [ $this, 'clear_variation_cache' ], 10, 3 );
+add_action( 'edited_product_cat', [ $this, 'clear_category_cache' ] );
+add_action( 'edited_pa_color', [ $this, 'clear_attribute_cache' ] ); // For pa_color attribute
+
+public function clear_product_cache( $product ) {
+    $product_id = $product->get_id();
+    wp_cache_delete( "product_{$product_id}_swatches", 'tee_variation_swatches' );
+    delete_transient( "tee_vs_product_{$product_id}_swatches" );
+}
+```
+
+## Style Guide
+
+- **Indentation**: Tabs (WordPress standard)
+- **Braces**: K&R style (opening brace on same line)
+- **Max line**: 120 characters
+- **Naming**: snake_case for functions/variables
+- **Strings**: Single quotes (unless interpolation needed)
+- **Arrays**: `array()` syntax (for PHP 5.4+ compatibility)
+- **Yoda conditions**: Use for comparisons with constants
+
+```php
+// Yoda conditions
+if ( 'publish' === $post_status ) {
+    // ...
+}
+
+if ( 10 < $stock_qty ) {
+    // ...
+}
+```
+
+## Type Hints
+
+```php
+public function get_swatch_data( int $term_id ): array {
+    return array(
+        'type'  => 'color',
+        'value' => '#ff0000',
+    );
+}
+
+private function render_swatch( \WP_Term $term, string $attribute_name ): void {
+    // Render logic
+}
+
+public function get_product( int $product_id ): ?\WC_Product {
+    $product = wc_get_product( $product_id );
+    return $product instanceof \WC_Product ? $product : null;
+}
+```
+
+## Error Handling
+
+```php
+// Check for WP_Error
+$result = some_function();
+if ( is_wp_error( $result ) ) {
+    if ( TEE_VS_DEBUG ) {
+        error_log( '[TEE VS] Error: ' . $result->get_error_message() );
+    }
+    return false;
+}
+
+// Check for null
+$product = wc_get_product( $product_id );
+if ( ! $product instanceof \WC_Product ) {
+    if ( TEE_VS_DEBUG ) {
+        error_log( "[TEE VS] Invalid product ID: {$product_id}" );
+    }
+    return array();
+}
+```
+
+## Documentation
+
+**PHPDoc for all public methods:**
+
+```php
+/**
+ * Get swatch data for a term
+ *
+ * @param int $term_id The term ID
+ * @return array Swatch data array with 'type' and 'value'
+ */
+public function get_swatch_data( int $term_id ): array {
+    // Implementation
+}
+
+/**
+ * Render swatches for a product attribute
+ *
+ * @param string     $attribute_name The attribute name (e.g., 'pa_color')
+ * @param \WC_Product $product        The product object
+ * @return void
+ */
+public function render_swatches( string $attribute_name, \WC_Product $product ): void {
+    // Implementation
+}
+```
+
+## Translation
+
+**All user-facing strings must be translatable:**
+
+```php
+__( 'Out of stock', 'tee-variation-swatches' );
+_e( 'Low stock', 'tee-variation-swatches' );
+esc_html__( 'Select an option', 'tee-variation-swatches' );
+esc_attr__( 'Color', 'tee-variation-swatches' );
+
+// With sprintf
+sprintf(
+    /* translators: %d: stock quantity */
+    __( 'Only %d left in stock', 'tee-variation-swatches' ),
+    $stock_qty
+);
+```
+
+**Text Domain**: `tee-variation-swatches`
+
+## AJAX Pattern
+
+```php
+// Register AJAX actions
+add_action( 'wp_ajax_tee_vs_get_stock', [ $this, 'ajax_get_stock' ] );
+add_action( 'wp_ajax_nopriv_tee_vs_get_stock', [ $this, 'ajax_get_stock' ] );
+
+// AJAX handler
+public function ajax_get_stock() {
+    // 1. Verify nonce
+    check_ajax_referer( 'tee_vs_nonce', 'nonce' );
+    
+    // 2. Sanitize input
+    $product_id = absint( $_POST['product_id'] ?? 0 );
+    
+    // 3. Validate
+    if ( ! $product_id ) {
+        wp_send_json_error( array(
+            'message' => __( 'Invalid product ID', 'tee-variation-swatches' ),
+        ) );
+    }
+    
+    // 4. Get data (use cache)
+    $stock_data = $this->get_stock_data( $product_id );
+    
+    // 5. Send response
+    wp_send_json_success( array(
+        'stock' => $stock_data,
+    ) );
+}
+```
+
+## Debug Logging
+
+**ALWAYS guard debug logs:**
+
+```php
+if ( TEE_VS_DEBUG ) {
+    error_log( '[TEE VS] Message: ' . $message );
+}
+
+// For arrays/objects
+if ( TEE_VS_DEBUG ) {
+    error_log( '[TEE VS] Data: ' . print_r( $data, true ) );
+}
+```
+
+## Hooks & Filters
+
+**Provide extensibility:**
+
+```php
+// Filter for swatch HTML
+$swatch_html = apply_filters( 'tee_vs_swatch_html', $html, $term, $attribute_name, $product );
+
+// Filter for cache TTL
+$cache_ttl = apply_filters( 'tee_vs_cache_ttl', HOUR_IN_SECONDS, $cache_key );
+
+// Action after swatch render
+do_action( 'tee_vs_after_swatch_render', $term, $attribute_name, $product );
+```

@@ -1,0 +1,148 @@
+# TEE Variation Swatches - Start Here
+
+**⭐ CRITICAL**: Read this first before making any changes to the plugin.
+
+## Plugin Overview
+
+**TEE Variation Swatches** provides high-performance WooCommerce variation swatches with:
+- Color, image, and button swatches for product variations
+- Fragment caching for optimal performance
+- Object cache support (Redis/Memcached compatible)
+- HPOS (High-Performance Order Storage) compatibility
+- Low stock indicators and stock-based availability
+- Tailwind CSS styling integration
+
+## Core Principles
+
+### 1. **Performance & Scalability First**
+- Object caching with transient fallback (dual-layer pattern)
+- Batch term meta queries to prevent N+1 problems
+- Fragment caching for swatch rendering
+- Smart cache invalidation scoped to product/variation changes
+- See: [performance.mdc](mdc:.cursor/rules/performance.mdc)
+
+### 2. **WooCommerce Data Stores**
+- Always use `WC_Product_Data_Store_CPT` and `WC_Data_Store`
+- Never query `wp_posts` or `wp_postmeta` directly for products
+- Support HPOS (custom tables) - test with HPOS enabled
+- Use `wc_get_product()`, `wc_get_products()` for product data
+
+### 3. **Security First**
+- Sanitize all user input: `sanitize_text_field()`, `absint()`, `sanitize_hex_color()`
+- Escape all output: `esc_html()`, `esc_attr()`, `esc_url()`
+- Verify nonces for AJAX: `check_ajax_referer()`
+- Validate file uploads and image data
+
+### 4. **Batch Operations**
+- Load term meta in bulk for multiple terms
+- Batch cache operations where possible
+- Avoid individual queries in loops
+- Prime WordPress caches before rendering
+
+### 5. **Client-Side Optimization**
+- Debounce AJAX requests (stock checks, variation changes)
+- Use native JavaScript over jQuery where possible
+- Cache DOM queries
+- Minimize reflows and repaints
+
+## Critical Known Issues
+
+**READ**: [improvements.md](mdc:improvements.md) contains critical performance and scalability issues that MUST be addressed:
+
+1. ❌ **Deprecated hooks** - `woocommerce_variation_set_stock` may not exist
+2. ❌ **Overly broad cache invalidation** - `updated_post_meta` fires on ALL posts
+3. ❌ **N+1 query problem** - Individual `get_term_meta()` calls in loops
+4. ❌ **Missing HPOS compatibility** - Not tested with HPOS enabled
+5. ❌ **No debouncing** - AJAX calls can fire rapidly without throttling
+
+**Action Required**: Fix these before production deployment.
+
+## Important Files
+
+### Core Plugin
+- `tee-variation-swatches.php` - Main plugin file with constants and autoloader
+- `includes/helpers.php` - Caching utilities and helper functions
+
+### Classes (Singleton Pattern)
+All classes should use singleton pattern with `instance()` method.
+
+**Expected Structure**:
+```
+includes/
+├── class-plugin.php              # Main plugin controller
+├── class-assets-manager.php      # Asset loading (conditional)
+├── class-cache-manager.php       # Cache invalidation
+├── class-swatch-renderer.php     # Swatch display logic
+├── admin/
+│   └── class-admin-settings.php  # Admin interface
+└── woocommerce/
+    ├── class-variation-handler.php   # Variation data
+    └── class-stock-manager.php       # Stock checks
+```
+
+## Quick Commands
+
+```bash
+# Build Tailwind CSS (if using Tailwind)
+npm run build
+
+# Development mode (watch)
+npm run dev
+```
+
+## Debug Mode
+
+Enable debug logging:
+```php
+define( 'TEE_VS_DEBUG', true );
+```
+
+## Performance Budgets
+
+**MUST NOT EXCEED:**
+- Database queries per product: < 10
+- Swatch render time: < 50ms
+- Cache hit rate: > 90%
+- AJAX response time: < 200ms
+
+## Development Workflow
+
+1. **Read improvements.md** - Understand known issues
+2. **Check WooCommerce compatibility** - Test with latest WooCommerce
+3. **Enable HPOS** - Test with HPOS enabled in WooCommerce settings
+4. **Batch queries** - Load data in bulk, never in loops
+5. **Cache aggressively** - Use object cache with transient fallback
+6. **Scope invalidation** - Only invalidate relevant caches
+7. **Debounce AJAX** - Add throttling to client-side requests
+
+## Constants
+
+Defined in `tee-variation-swatches.php`:
+- `TEE_VS_VERSION` - Plugin version
+- `TEE_VS_PATH` - Plugin directory path
+- `TEE_VS_URL` - Plugin URL
+- `TEE_VS_BASENAME` - Plugin basename
+- `TEE_VS_DEBUG` - Debug mode flag
+
+## WooCommerce Compatibility
+
+**Minimum Requirements**:
+- WordPress: 6.4+
+- PHP: 8.0+
+- WooCommerce: 8.0+
+
+**Test With**:
+- HPOS enabled
+- Object cache enabled (Redis/Memcached)
+- Large product catalogs (1000+ variations)
+
+## Need Help?
+
+1. Check [improvements.md](mdc:improvements.md) for known issues
+2. Review [performance.mdc](mdc:.cursor/rules/performance.mdc) for caching patterns
+3. See [common-tasks.mdc](mdc:.cursor/rules/common-tasks.mdc) for how-to guides
+4. Reference [code-standards.mdc](mdc:.cursor/rules/code-standards.mdc) for security patterns
+
+## Contact
+
+**Email**: phpdevsec@proton.me

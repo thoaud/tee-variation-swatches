@@ -1,0 +1,397 @@
+---
+globs: repo/wp-content/plugins/tee-variation-swatches/*
+alwaysApply: false
+---
+
+# Common Tasks
+
+## Add New Swatch Type
+
+**Pattern**: Extend swatch types beyond color, image, button
+
+```php
+// 1. Add option to admin settings
+public function add_swatch_type_option( $types ) {
+    $types['gradient'] = __( 'Gradient', 'tee-variation-swatches' );
+    return $types;
+}
+add_filter( 'tee_vs_swatch_types', 'add_swatch_type_option' );
+
+// 2. Save term meta
+public function save_gradient_meta( $term_id ) {
+    if ( isset( $_POST['tee_vs_gradient_start'] ) ) {
+        update_term_meta(
+            $term_id,
+            'tee_vs_gradient_start',
+            sanitize_hex_color( $_POST['tee_vs_gradient_start'] )
+        );
+    }
+    if ( isset( $_POST['tee_vs_gradient_end'] ) ) {
+        update_term_meta(
+            $term_id,
+            'tee_vs_gradient_end',
+            sanitize_hex_color( $_POST['tee_vs_gradient_end'] )
+        );
+    }
+}
+
+// 3. Render swatch
+public function render_gradient_swatch( $term_id ) {
+    $start = get_term_meta( $term_id, 'tee_vs_gradient_start', true );
+    $end = get_term_meta( $term_id, 'tee_vs_gradient_end', true );
+    
+    printf(
+        '<span class="tee-swatch-gradient" style="background: linear-gradient(135deg, %s 0%%, %s 100%%)"></span>',
+        esc_attr( $start ),
+        esc_attr( $end )
+    );
+}
+```
+
+## Add Stock Badge
+
+**Pattern**: Display stock level on swatches
+
+```php
+public function add_stock_badge( $term, $variation_id ) {
+    $variation = wc_get_product( $variation_id );
+    
+    if ( ! $variation instanceof \WC_Product_Variation ) {
+        return;
+    }
+    
+    $stock_qty = $variation->get_stock_quantity();
+    $threshold = get_option( 'tee_vs_low_stock_threshold', 10 );
+    
+    if ( ! $variation->is_in_stock() ) {
+        echo '<span class="tee-stock-badge out-of-stock">' . esc_html__( 'Out of stock', 'tee-variation-swatches' ) . '</span>';
+    } elseif ( $stock_qty && $stock_qty <= $threshold ) {
+        printf(
+            '<span class="tee-stock-badge low-stock">%s</span>',
+            sprintf(
+                /* translators: %d: stock quantity */
+                esc_html__( 'Only %d left', 'tee-variation-swatches' ),
+                $stock_qty
+            )
+        );
+    }
+}
+```
+
+## Add Custom Attribute Display
+
+**Pattern**: Customize how attributes are displayed
+
+```php
+public function customize_attribute_display( $attribute_name, $product ) {
+    // Get attribute terms
+    $terms = wc_get_product_terms(
+        $product->get_id(),
+        $attribute_name,
+        array( 'fields' => 'all' )
+    );
+    
+    // Batch load term meta (avoid N+1)
+    $term_ids = wp_list_pluck( $terms, 'term_id' );
+    $swatch_data = $this->get_batch_term_meta( $term_ids );
+    
+    // Render
+    foreach ( $terms as $term ) {
+        $data = $swatch_data[ $term->term_id ] ?? array();
+        $this->render_swatch( $term, $data );
+    }
+}
+
+/**
+ * Batch load term meta to avoid N+1
+ */
+private function get_batch_term_meta( $term_ids ) {
+    $cache_key = 'terms_meta_' . md5( serialize( $term_ids ) );
+    $cached = tee_vs_cache_get( $cache_key );
+    
+    if ( false !== $cached ) {
+        return $cached;
+    }
+    
+    $swatch_data = array();
+    
+    // Load all meta for all terms
+    foreach ( $term_ids as $term_id ) {
+        $all_meta = get_term_meta( $term_id );
+        $swatch_data[ $term_id ] = array(
+            'type'  => $all_meta['tee_vs_swatch_type'][0] ?? '',
+            'color' => $all_meta['tee_vs_swatch_color'][0] ?? '',
+            'image' => $all_meta['tee_vs_swatch_image_id'][0] ?? '',
+        );
+    }
+    
+    tee_vs_cache_set( $cache_key, $swatch_data, 6 * HOUR_IN_SECONDS );
+    
+    return $swatch_data;
+}
+```
+
+## Add AJAX Endpoint
+
+**Pattern**: Add new AJAX handler for stock checks
+
+```php
+// 1. Register AJAX actions
+public function register_ajax_actions() {
+    add_action( 'wp_ajax_tee_vs_get_stock', [ $this, 'ajax_get_stock' ] );
+    add_action( 'wp_ajax_nopriv_tee_vs_get_stock', [ $this, 'ajax_get_stock' ] );
+}
+
+// 2. Implement handler
+public function ajax_get_stock() {
+    // Verify nonce
+    check_ajax_referer( 'tee_vs_nonce', 'nonce' );
+    
+    // Sanitize input
+    $product_id = absint( $_POST['product_id'] ?? 0 );
+    
+    if ( ! $product_id ) {
+        wp_send_json_error( array(
+            'message' => __( 'Invalid product ID', 'tee-variation-swatches' ),
+        ) );
+    }
+    
+    // Get stock data (use cache)
+    $stock_data = $this->get_cached_stock_data( $product_id );
+    
+    wp_send_json_success( array(
+        'stock' => $stock_data,
+    ) );
+}
+
+// 3. Cache stock data
+private function get_cached_stock_data( $product_id ) {
+    $cache_key = "stock_{$product_id}";
+    $cached = tee_vs_cache_get( $cache_key );
+    
+    if ( false !== $cached ) {
+        return $cached;
+    }
+    
+    $product = wc_get_product( $product_id );
+    
+    if ( ! $product instanceof \WC_Product_Variable ) {
+        return array();
+    }
+    
+    $variations = $product->get_available_variations();
+    $stock_data = array();
+    
+    foreach ( $variations as $variation ) {
+        $variation_obj = wc_get_product( $variation['variation_id'] );
+        
+        $stock_data[ $variation['variation_id'] ] = array(
+            'in_stock'   => $variation_obj->is_in_stock(),
+            'stock_qty'  => $variation_obj->get_stock_quantity(),
+            'backorder'  => $variation_obj->is_on_backorder(),
+        );
+    }
+    
+    tee_vs_cache_set( $cache_key, $stock_data, HOUR_IN_SECONDS );
+    
+    return $stock_data;
+}
+```
+
+## Add Admin Setting
+
+**Pattern**: Add new setting to admin panel
+
+```php
+// 1. Register setting
+public function register_settings() {
+    register_setting(
+        'tee_vs_options_group',
+        'tee_vs_options',
+        [ $this, 'sanitize_settings' ]
+    );
+    
+    add_settings_section(
+        'tee_vs_general',
+        __( 'General Settings', 'tee-variation-swatches' ),
+        null,
+        'tee-variation-swatches'
+    );
+    
+    add_settings_field(
+        'swatch_size',
+        __( 'Swatch Size', 'tee-variation-swatches' ),
+        [ $this, 'render_swatch_size_field' ],
+        'tee-variation-swatches',
+        'tee_vs_general'
+    );
+}
+
+// 2. Render field
+public function render_swatch_size_field() {
+    $options = get_option( 'tee_vs_options', array() );
+    $size = $options['swatch_size'] ?? '48';
+    ?>
+    <input type="number" 
+           name="tee_vs_options[swatch_size]" 
+           value="<?php echo esc_attr( $size ); ?>" 
+           min="24" 
+           max="100" 
+           step="4" />
+    <p class="description">
+        <?php esc_html_e( 'Size of swatches in pixels', 'tee-variation-swatches' ); ?>
+    </p>
+    <?php
+}
+
+// 3. Sanitize
+public function sanitize_settings( $input ) {
+    $sanitized = array();
+    
+    if ( isset( $input['swatch_size'] ) ) {
+        $sanitized['swatch_size'] = absint( $input['swatch_size'] );
+        
+        // Validate range
+        if ( $sanitized['swatch_size'] < 24 || $sanitized['swatch_size'] > 100 ) {
+            $sanitized['swatch_size'] = 48; // Default
+        }
+    }
+    
+    return $sanitized;
+}
+```
+
+## Clear Cache Programmatically
+
+**Pattern**: Manually clear cache for specific product
+
+```php
+/**
+ * Clear all caches for a product
+ */
+public function clear_product_caches( $product_id ) {
+    $product = wc_get_product( $product_id );
+    
+    if ( ! $product instanceof \WC_Product ) {
+        return false;
+    }
+    
+    // Clear swatches cache
+    wp_cache_delete( "swatches_{$product_id}", 'tee_variation_swatches' );
+    delete_transient( "tee_vs_swatches_{$product_id}" );
+    
+    // Clear stock cache
+    wp_cache_delete( "stock_{$product_id}", 'tee_variation_swatches' );
+    delete_transient( "tee_vs_stock_{$product_id}" );
+    
+    // Clear variation caches
+    if ( $product instanceof \WC_Product_Variable ) {
+        $variations = $product->get_children();
+        foreach ( $variations as $variation_id ) {
+            wp_cache_delete( "variation_{$variation_id}", 'tee_variation_swatches' );
+            delete_transient( "tee_vs_variation_{$variation_id}" );
+        }
+    }
+    
+    return true;
+}
+
+// Usage
+TEE_Variation_Swatches()->cache_manager->clear_product_caches( 123 );
+```
+
+## Add WP-CLI Command
+
+**Pattern**: Add CLI command for cache management
+
+```php
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+    WP_CLI::add_command( 'tee-vs cache', 'TEE_VS_CLI_Commands' );
+}
+
+class TEE_VS_CLI_Commands {
+    
+    /**
+     * Clear all variation swatches caches
+     *
+     * ## EXAMPLES
+     *
+     *     wp tee-vs cache clear
+     */
+    public function clear( $args, $assoc_args ) {
+        global $wpdb;
+        
+        // Clear object cache
+        wp_cache_flush_group( 'tee_variation_swatches' );
+        
+        // Clear transients
+        $wpdb->query(
+            "DELETE FROM {$wpdb->options}
+            WHERE option_name LIKE '_transient_tee_vs_%'
+            OR option_name LIKE '_transient_timeout_tee_vs_%'"
+        );
+        
+        WP_CLI::success( 'All variation swatches caches cleared.' );
+    }
+}
+```
+
+## Debug Cache Performance
+
+**Pattern**: Log cache hits/misses for debugging
+
+```php
+public function debug_cache_performance() {
+    if ( ! TEE_VS_DEBUG ) {
+        return;
+    }
+    
+    static $cache_hits = 0;
+    static $cache_misses = 0;
+    
+    add_filter( 'tee_vs_cache_hit', function( $key ) use ( &$cache_hits ) {
+        $cache_hits++;
+        error_log( "[TEE VS] Cache HIT: {$key} (Total hits: {$cache_hits})" );
+    } );
+    
+    add_filter( 'tee_vs_cache_miss', function( $key ) use ( &$cache_misses ) {
+        $cache_misses++;
+        error_log( "[TEE VS] Cache MISS: {$key} (Total misses: {$cache_misses})" );
+    } );
+    
+    add_action( 'shutdown', function() use ( &$cache_hits, &$cache_misses ) {
+        $total = $cache_hits + $cache_misses;
+        $hit_rate = $total > 0 ? ( $cache_hits / $total * 100 ) : 0;
+        error_log( sprintf(
+            '[TEE VS] Cache Performance: %.2f%% hit rate (%d hits, %d misses)',
+            $hit_rate,
+            $cache_hits,
+            $cache_misses
+        ) );
+    } );
+}
+```
+
+## Test HPOS Compatibility
+
+**Pattern**: Check if plugin works with HPOS
+
+```php
+/**
+ * Verify HPOS compatibility
+ */
+public function test_hpos_compatibility() {
+    // Check if HPOS is enabled
+    if ( ! class_exists( 'Automattic\WooCommerce\Utilities\OrderUtil' ) ) {
+        return false;
+    }
+    
+    $is_hpos = \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+    
+    if ( TEE_VS_DEBUG ) {
+        error_log( '[TEE VS] HPOS Enabled: ' . ( $is_hpos ? 'Yes' : 'No' ) );
+    }
+    
+    return $is_hpos;
+}
+```

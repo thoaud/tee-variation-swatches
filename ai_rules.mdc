@@ -1,0 +1,40 @@
+---
+globs: repo/wp-content/plugins/tee-variation-swatches/*
+alwaysApply: false
+---
+
+# TEE Variation Swatches - AI Rules
+
+**Cursor Rules**: See [.cursor/rules/](.cursor/rules/) directory
+
+**Documentation Priority**:
+- ⭐ CRITICAL: [.cursor/rules/00-start-here.mdc](.cursor/rules/00-start-here.mdc) - Essential rules & overview
+- ⭐ CRITICAL: [improvements.md](improvements.md) - Known issues & recommendations
+- 📘 IMPORTANT: [.cursor/rules/performance.mdc](.cursor/rules/performance.mdc) - Caching & optimization patterns
+- 📚 REFERENCE: [.cursor/rules/common-tasks.mdc](.cursor/rules/common-tasks.mdc) - How-to guides
+
+## Rules Files
+
+**Always Applied**:
+- `00-start-here.mdc` - Critical rules and overview
+- `plugin-architecture.mdc` - Structure & patterns
+- `code-standards.mdc` - PHP security & WooCommerce integration
+
+**On-Demand**:
+- `performance.mdc` - Caching and optimization patterns
+- `common-tasks.mdc` - How-to guides
+
+## Quick Reference
+
+**Core Principles**:
+- ✅ Object caching first - Always use `wp_cache_*()` with fallback to transients
+- ✅ Batch queries - Prevent N+1 problems by loading data in bulk
+- ✅ HPOS compatibility - Use WooCommerce Data Stores, not direct DB queries
+- ✅ Security first - Sanitize input, escape output, verify nonces
+- ✅ Debounce AJAX - Prevent rapid-fire requests
+
+**Critical Patterns**:
+- Fragment caching for swatch rendering
+- Batch term meta loading to avoid N+1 queries
+- Smart cache invalidation on product/variation changes
+- Debounced stock checks on client-side
