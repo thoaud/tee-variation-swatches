@@ -90,6 +90,85 @@ function tee_vs_get_term_swatch_data( $term_id ) {
 }
 
 /**
+ * Batch load swatch data for many terms, cached per taxonomy and product version
+ *
+ * @param array  $term_ids  Term IDs.
+ * @param string $taxonomy  Taxonomy slug.
+ * @param int    $product_id Product context for versioned key.
+ * @return array<int,array>
+ */
+function tee_vs_get_term_swatch_data_batch( array $term_ids, string $taxonomy, int $product_id = 0 ): array {
+    $term_ids = array_values( array_unique( array_filter( array_map( 'intval', $term_ids ) ) ) );
+    if ( empty( $term_ids ) ) {
+        return array();
+    }
+
+    $cache     = \TEE\Variation_Swatches\Cache_Manager::instance();
+    $base_key  = sprintf( 'term_meta_batch_%s_%s', $taxonomy, $product_id > 0 ? (string) $product_id : 'global' );
+    $cache_key = $product_id > 0 ? $cache->versioned_key( $base_key, $product_id ) : $base_key;
+
+    $batched = tee_vs_cache_get( $cache_key );
+    if ( false === $batched ) {
+        global $wpdb; // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+        $batched = array();
+        $placeholders = implode( ',', array_fill( 0, count( $term_ids ), '%d' ) );
+        $meta_keys    = array( 'tee_vs_swatch_type', 'tee_vs_swatch_color', 'tee_vs_swatch_image_id', 'tee_vs_swatch_description' );
+        $meta_ph      = implode( ',', array_fill( 0, count( $meta_keys ), '%s' ) );
+
+        $sql = $wpdb->prepare(
+            "SELECT tm.term_id, tm.meta_key, tm.meta_value
+             FROM {$wpdb->termmeta} tm
+             WHERE tm.term_id IN ($placeholders)
+               AND tm.meta_key IN ($meta_ph)",
+            array_merge( $term_ids, $meta_keys )
+        );
+        $rows = $wpdb->get_results( $sql ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching
+
+        foreach ( $term_ids as $tid ) {
+            $batched[ $tid ] = array(
+                'swatch_type'        => '',
+                'swatch_color'       => '',
+                'swatch_image_id'    => '',
+                'swatch_description' => '',
+            );
+        }
+
+        foreach ( (array) $rows as $row ) {
+            $tid = (int) $row->term_id;
+            if ( ! isset( $batched[ $tid ] ) ) {
+                $batched[ $tid ] = array();
+            }
+            switch ( $row->meta_key ) {
+                case 'tee_vs_swatch_type':
+                    $batched[ $tid ]['swatch_type'] = $row->meta_value;
+                    break;
+                case 'tee_vs_swatch_color':
+                    $batched[ $tid ]['swatch_color'] = $row->meta_value;
+                    break;
+                case 'tee_vs_swatch_image_id':
+                    $batched[ $tid ]['swatch_image_id'] = $row->meta_value;
+                    break;
+                case 'tee_vs_swatch_description':
+                    $batched[ $tid ]['swatch_description'] = $row->meta_value;
+                    break;
+            }
+        }
+
+        // Cache 2 hours.
+        tee_vs_cache_set( $cache_key, $batched, 2 * HOUR_IN_SECONDS );
+    }
+
+    // Return subset for requested IDs.
+    $result = array();
+    foreach ( $term_ids as $tid ) {
+        if ( isset( $batched[ $tid ] ) ) {
+            $result[ $tid ] = $batched[ $tid ];
+        }
+    }
+    return $result;
+}
+
+/**
  * Sanitize swatch type
  *
  * @param string $type Swatch type.
